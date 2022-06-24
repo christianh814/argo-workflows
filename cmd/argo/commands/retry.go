@@ -7,6 +7,7 @@ import (
 
 	"github.com/argoproj/pkg/errors"
 	"github.com/spf13/cobra"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
@@ -22,6 +23,7 @@ type retryOps struct {
 	namespace         string // --namespace
 	labelSelector     string // --selector
 	fieldSelector     string // --field-selector
+	debug             string // --debug
 }
 
 // hasSelector returns true if the CLI arguments selects multiple workflows
@@ -30,6 +32,11 @@ func (o *retryOps) hasSelector() bool {
 		return true
 	}
 	return false
+}
+
+// runWithDebug returns true if the CLI argument passes in a debug argument
+func (o *retryOps) runWithDebug() bool {
+	return o.debug != ""
 }
 
 func NewRetryCommand() *cobra.Command {
@@ -93,6 +100,7 @@ func NewRetryCommand() *cobra.Command {
 	command.Flags().StringVar(&retryOpts.nodeFieldSelector, "node-field-selector", "", "selector of nodes to reset, eg: --node-field-selector inputs.paramaters.myparam.value=abc")
 	command.Flags().StringVarP(&retryOpts.labelSelector, "selector", "l", "", "Selector (label query) to filter on, not including uninitialized ones, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
 	command.Flags().StringVar(&retryOpts.fieldSelector, "field-selector", "", "Selector (field query) to filter on, supports '=', '==', and '!='.(e.g. --field-selector key1=value1,key2=value2). The server only supports a limited number of field queries per type.")
+	command.Flags().StringVar(&retryOpts.debug, "debug", "", "Introduces a debug pause. Valid options are 'after' and 'before'")
 	return command
 }
 
@@ -114,6 +122,24 @@ func retryWorkflows(ctx context.Context, serviceClient workflowpkg.WorkflowServi
 		}
 	}
 
+	var debugOption v1.EnvVar
+	if retryOpts.runWithDebug() {
+		switch retryOpts.debug {
+		case "after":
+			debugOption = v1.EnvVar{
+				Name:  "ARGO_DEBUG_PAUSE_AFTER",
+				Value: `true`,
+			}
+		case "before":
+			debugOption = v1.EnvVar{
+				Name:  "ARGO_DEBUG_PAUSE_BEFORE",
+				Value: `true`,
+			}
+		default:
+			return fmt.Errorf("invalid debug mode: '%s'", retryOpts.debug)
+		}
+	}
+
 	for _, n := range args {
 		wfs = append(wfs, wfv1.Workflow{
 			ObjectMeta: metav1.ObjectMeta{
@@ -131,6 +157,12 @@ func retryWorkflows(ctx context.Context, serviceClient workflowpkg.WorkflowServi
 			continue
 		}
 		retriedNames[wf.Name] = true
+
+		if retryOpts.runWithDebug() {
+			for _, t := range wf.Spec.Templates {
+				t.Container.Env = append(t.Container.Env, debugOption)
+			}
+		}
 
 		lastRetried, err = serviceClient.RetryWorkflow(ctx, &workflowpkg.WorkflowRetryRequest{
 			Name:              wf.Name,
